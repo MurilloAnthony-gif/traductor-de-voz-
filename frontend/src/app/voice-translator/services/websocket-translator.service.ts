@@ -59,17 +59,15 @@ export class WebsocketTranslatorService {
    */
   sendConfig(mode: 'auto' | 'manual', lang1?: string, lang2?: string): void {
     const configMsg: any = { type: 'config', mode };
-    if (mode === 'manual' && lang1 && lang2) {
-      configMsg.lang1 = lang1;
-      configMsg.lang2 = lang2;
-    }
+    if (lang1) configMsg.lang1 = lang1;
+    if (lang2) configMsg.lang2 = lang2;
     this.send(configMsg);
   }
 
   /**
-   * Convierte un Blob de audio (la frase completa) a Base64 y lo envía al servidor.
+   * Envía un fragmento de audio al servidor para la transcripción en tiempo real.
    */
-  sendAudioUtterance(blob: Blob): void {
+  sendAudioChunk(blob: Blob): void {
     const reader = new FileReader();
     reader.readAsDataURL(blob);
     reader.onloadend = () => {
@@ -77,7 +75,24 @@ export class WebsocketTranslatorService {
       const base64String = base64data.split(',')[1];
       
       this.send({
-        type: 'audio_utterance',
+        type: 'audio_chunk',
+        data: base64String
+      });
+    };
+  }
+
+  /**
+   * Avisa al servidor que el usuario dejó de hablar, enviando el audio final.
+   */
+  sendEndUtterance(blob: Blob): void {
+    const reader = new FileReader();
+    reader.readAsDataURL(blob);
+    reader.onloadend = () => {
+      const base64data = reader.result as string;
+      const base64String = base64data.split(',')[1];
+      
+      this.send({
+        type: 'end_utterance',
         data: base64String
       });
     };
@@ -101,7 +116,7 @@ export class WebsocketTranslatorService {
     this._connectionStatus$.next('disconnected');
   }
 
-  private send(data: any): void {
+  send(data: any): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     } else {

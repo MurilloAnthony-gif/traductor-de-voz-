@@ -3,9 +3,16 @@ export interface WsTranslationResult {
   transcripcion: string;
   traduccion: string;
   audio_base64: string;
-  /** Idioma detectado automáticamente (ej. "es", "en") */
   source_lang?: string;
-  /** Idioma destino de la traducción */
+  target_lang?: string;
+}
+
+export interface WsMeetingResult {
+  type: 'meeting_result';
+  transcripcion: string;
+  traduccion: string;
+  audio_base64: string;
+  source_lang?: string;
   target_lang?: string;
 }
 
@@ -19,10 +26,26 @@ export interface WsError {
   message: string;
 }
 
-export type WsMessage = WsTranslationResult | WsNoSpeech | WsError;
+export interface WsPartialTranscription {
+  type: 'partial_transcription';
+  text: string;
+}
+
+export interface WsPartialTranslationResult {
+  type: 'partial_translation_result';
+  traduccion: string;
+  emocion?: string;
+}
+
+export interface WsPartialAudio {
+  type: 'partial_audio';
+  audio_base64: string;
+}
+
+export type WsMessage = WsTranslationResult | WsMeetingResult | WsPartialTranscription | WsPartialTranslationResult | WsPartialAudio | WsNoSpeech | WsError;
 
 /** Estados posibles del flujo de grabación y traducción. */
-export type RecordingState = 'idle' | 'listening' | 'processing' | 'error';
+export type RecordingState = 'idle' | 'listening' | 'meeting' | 'processing' | 'error';
 
 /** Idiomas soportados en el prototipo. */
 export interface Language {

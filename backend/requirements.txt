@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
 faster-whisper
-deep-translator
 gTTS
 python-multipart
+deep-translator
