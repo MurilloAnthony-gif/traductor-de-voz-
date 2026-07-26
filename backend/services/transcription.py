@@ -17,11 +17,11 @@ _model: WhisperModel | None = None
 
 
 def _get_model() -> WhisperModel:
-    """Carga el modelo Whisper 'small' usando faster-whisper para CPU y lo reutiliza."""
+    """Carga el modelo Whisper 'base' usando faster-whisper para CPU y lo reutiliza."""
     global _model
     if _model is None:
-        print("[Whisper] Cargando modelo 'small' (faster-whisper)... (solo ocurre una vez)")
-        _model = WhisperModel("small", device="cpu", compute_type="int8")
+        print("[Whisper] Cargando modelo 'base' (faster-whisper)... (solo ocurre una vez)")
+        _model = WhisperModel("base", device="cpu", compute_type="int8")
         print("[Whisper] Modelo listo.")
     return _model
 
@@ -62,16 +62,29 @@ def transcribe(audio_bytes: bytes, expected_langs: list[str] | None = None) -> t
 
         segments, info = model.transcribe(
             tmp_path,
-            language=lang_hint,            # None = auto-detect, o un código ISO forzado
-            condition_on_previous_text=False,
-            no_speech_threshold=0.6,
-            log_prob_threshold=-1.0,
-            beam_size=1,                   # Greedy search: más rápido que beam_size=5
-            vad_filter=True,               # Filtra segmentos de silencio automáticamente
-            vad_parameters=dict(min_silence_duration_ms=300)
+            language=lang_hint,
+            beam_size=1,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+            condition_on_previous_text=False
         )
 
         detected_lang = info.language   # "es", "en", etc.
+        
+        # Fallback: si detecta un idioma no esperado (ej. "ja" o "ur"), forzamos el principal
+        if not lang_hint and expected_langs and len(expected_langs) >= 2:
+            if detected_lang not in expected_langs:
+                print(f"[Whisper] Detectó {detected_lang}, pero se esperaba {expected_langs}. Forzando {expected_langs[0]}...")
+                segments, info = model.transcribe(
+                    tmp_path,
+                    language=expected_langs[0],
+                    beam_size=1,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500),
+                    condition_on_previous_text=False
+                )
+                detected_lang = expected_langs[0]
+
         text = " ".join([seg.text for seg in segments]).strip()
 
         if not text:

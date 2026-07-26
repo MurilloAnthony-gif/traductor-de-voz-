@@ -19,7 +19,6 @@ export class WebsocketTranslatorService {
 
   /**
    * Conecta al WebSocket del servidor.
-   * El idioma ya no se envía porque el backend lo detecta automáticamente.
    */
   connect(): void {
     if (this.ws) {
@@ -27,11 +26,11 @@ export class WebsocketTranslatorService {
     }
 
     this._connectionStatus$.next('connecting');
-    this.ws = new WebSocket('ws://localhost:8000/ws/translate');
+    this.ws = new WebSocket('ws://127.0.0.1:8000/ws/translate');
 
     this.ws.onopen = () => {
       this._connectionStatus$.next('connected');
-      console.log('[WS] Conectado al servidor de traducción (bidireccional auto-detect)');
+      console.log('[WS] Conectado al servidor de traducción');
     };
 
     this.ws.onmessage = (event) => {
@@ -67,7 +66,7 @@ export class WebsocketTranslatorService {
   /**
    * Envía un fragmento de audio al servidor para la transcripción en tiempo real.
    */
-  sendAudioChunk(blob: Blob): void {
+  sendMeetingChunk(blob: Blob): void {
     const reader = new FileReader();
     reader.readAsDataURL(blob);
     reader.onloadend = () => {
@@ -75,7 +74,7 @@ export class WebsocketTranslatorService {
       const base64String = base64data.split(',')[1];
       
       this.send({
-        type: 'audio_chunk',
+        type: 'meeting_chunk',
         data: base64String
       });
     };

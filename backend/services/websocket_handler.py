@@ -38,6 +38,44 @@ async def handle_ws_session(websocket: WebSocket) -> None:
 
     closed = [False]
     processing_lock = asyncio.Lock()
+    
+    # Cola inteligente para no ahogar la CPU con meeting_chunks
+    chunk_queue = asyncio.Queue(maxsize=1)
+    
+    async def process_chunks_loop():
+        while not closed[0]:
+            try:
+                # Esperamos un audio
+                audio_bytes = await chunk_queue.get()
+                if closed[0]:
+                    break
+                    
+                # Procesar el chunk más reciente
+                text, detected_lang = await _run_in_thread(transcribe, audio_bytes, [lang1, lang2])
+                print(f"[WS Meeting] Detectado: {detected_lang!r} | Texto: {text!r}")
+
+                if text and re.search(r'[a-zA-ZáéíóúÁÉÍÓÚñÑüÜäöüßÄÖÜ]', text):
+                    target_lang = lang2
+                    if detected_lang == lang2:
+                        target_lang = lang1
+
+                    traduccion = await _run_in_thread(translate, text, detected_lang, target_lang)
+                    print(f"[WS Meeting] Traducción: {traduccion!r}")
+
+                    await _safe_send(websocket, {
+                        "type":          "meeting_result",
+                        "transcripcion": text,
+                        "traduccion":    traduccion,
+                        "source_lang":   detected_lang,
+                        "target_lang":   target_lang,
+                    }, closed)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[WS Meeting Loop] Error ignorado: {e}")
+                pass
+                
+    loop_task = asyncio.create_task(process_chunks_loop())
 
     try:
         while True:
@@ -52,50 +90,49 @@ async def handle_ws_session(websocket: WebSocket) -> None:
             elif msg_type == "meeting_chunk":
                 if "data" not in message: continue
                 audio_bytes = base64.b64decode(message["data"])
-                # Procesamiento asincrónico: no bloquea el loop para recibir más chunks
-                asyncio.create_task(
-                    _process_meeting_chunk(
-                        websocket, audio_bytes,
-                        lang1, lang2, closed
-                    )
-                )
+                if chunk_queue.full():
+                    try:
+                        chunk_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                chunk_queue.put_nowait(audio_bytes)
 
             elif msg_type == "translate_text":
-                text = message.get("text", "")
-                if not text.strip(): continue
-                try:
-                    traduccion = await _run_in_thread(
-                        GoogleTranslator(source=lang1, target=lang2).translate, text
-                    )
-                    await _safe_send(websocket, {
-                        "type": "partial_translation_result",
-                        "traduccion": traduccion
-                    }, closed)
-                except Exception as e:
-                    print(f"[WS] Error en traducción en vivo: {e}")
+                text_to_translate = message.get("text", "")
+                if text_to_translate.strip():
+                    try:
+                        print(f"[WS] translate_text recibido: {text_to_translate!r}")
+                        traduccion = await _run_in_thread(
+                            GoogleTranslator(source=lang1, target=lang2).translate, text_to_translate
+                        )
+                        await _safe_send(websocket, {
+                            "type": "partial_translation_result",
+                            "traduccion": traduccion
+                        }, closed)
+                    except Exception as e:
+                        print(f"[WS] Error en translate_text: {e}")
 
             elif msg_type == "translate_and_speak_chunk":
                 chunk = message.get("text", "")
-                if not chunk.strip(): continue
-                try:
-                    traduccion = await _run_in_thread(
-                        GoogleTranslator(source=lang1, target=lang2).translate, chunk
-                    )
-                    audio_b64 = await _run_in_thread(synthesize, traduccion, lang2)
-                    await _safe_send(websocket, {
-                        "type": "partial_audio",
-                        "audio_base64": audio_b64
-                    }, closed)
-                except Exception as e:
-                    print(f"[WS] Error en TTS simultáneo: {e}")
+                if chunk.strip():
+                    try:
+                        print(f"[WS] translate_and_speak_chunk recibido: {chunk!r}")
+                        traduccion = await _run_in_thread(
+                            GoogleTranslator(source=lang1, target=lang2).translate, chunk
+                        )
+                        audio_b64 = await _run_in_thread(synthesize, traduccion, lang2)
+                        await _safe_send(websocket, {
+                            "type": "partial_audio",
+                            "audio_base64": audio_b64
+                        }, closed)
+                    except Exception as e:
+                        print(f"[WS] Error en TTS simultáneo: {e}")
 
             elif msg_type == "end_utterance":
                 print("[WS] Mensaje end_utterance recibido")
                 if "data" not in message:
-                    print("[WS] No hay data en end_utterance")
                     continue
                 audio_bytes = base64.b64decode(message["data"])
-                print(f"[WS] Audio bytes decodificados: {len(audio_bytes)} bytes")
 
                 asyncio.create_task(
                     _process_final(
@@ -111,6 +148,8 @@ async def handle_ws_session(websocket: WebSocket) -> None:
     except Exception as exc:
         closed[0] = True
         print(f"[WS] Error inesperado en sesión: {exc}")
+    finally:
+        loop_task.cancel()
 
 
 async def _process_final(
@@ -164,52 +203,3 @@ async def _process_final(
         except Exception as exc:
             print(f"[WS Final] Error: {exc}")
             await _safe_send(websocket, {"type": "error", "message": "Error procesando el audio final."}, closed)
-
-
-async def _process_meeting_chunk(
-    websocket: WebSocket,
-    audio_bytes: bytes,
-    lang1: str,
-    lang2: str,
-    closed: list,
-) -> None:
-    """
-    Transcribe un chunk de reunión (audio del sistema capturado con getDisplayMedia).
-    Auto-detecta el idioma y traduce siempre al idioma destino elegido por el usuario.
-    No usa lock para permitir procesamiento paralelo de chunks.
-    """
-    if closed[0]:
-        return
-    try:
-        # Auto-detectar idioma — pasamos ambos como pista pero Whisper decide
-        text, detected_lang = await _run_in_thread(transcribe, audio_bytes, [lang1, lang2])
-        print(f"[WS Meeting] Detectado: {detected_lang!r} | Texto: {text!r}")
-
-        if not text or not re.search(r'[a-zA-ZáéíóúÁÉÍÓÚñÑüÜäöüßÄÖÜ]', text):
-            return  # Silencio o ruido — ignorar sin avisar al usuario
-
-        # Siempre traducir al idioma destino del usuario (lang2)
-        target_lang = lang2
-        if detected_lang == lang2:
-            # Si el audio ya está en el idioma destino, traducir al origen
-            target_lang = lang1
-
-        traduccion = await _run_in_thread(translate, text, detected_lang, target_lang)
-        print(f"[WS Meeting] Traducción: {traduccion!r}")
-
-        audio_b64 = await _run_in_thread(synthesize, traduccion, target_lang)
-
-        await _safe_send(websocket, {
-            "type":          "meeting_result",
-            "transcripcion": text,
-            "traduccion":    traduccion,
-            "source_lang":   detected_lang,
-            "target_lang":   target_lang,
-            "audio_base64":  audio_b64,
-        }, closed)
-
-    except ValueError:
-        pass  # Silencio en el chunk — ignorar
-    except Exception as exc:
-        print(f"[WS Meeting] Error procesando chunk: {exc}")
-

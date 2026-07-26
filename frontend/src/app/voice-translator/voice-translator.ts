@@ -84,11 +84,11 @@ export class VoiceTranslator implements OnDestroy {
   });
 
   readonly inputStatusLabel = computed(() =>
-    ({ idle: 'En espera', listening: 'Escuchando', processing: 'Procesando', done: 'Listo', error: 'Error' }[this.state()])
+    ({ idle: 'En espera', listening: 'Escuchando', meeting: 'Reunión', processing: 'Procesando', error: 'Error' }[this.state()])
   );
 
   readonly inputStatusSeverity = computed<'secondary' | 'warn' | 'success' | 'danger'>(() =>
-    ({ idle: 'secondary', listening: 'warn', processing: 'warn', done: 'success', error: 'danger' }[this.state()] as any)
+    ({ idle: 'secondary', listening: 'warn', meeting: 'success', processing: 'warn', error: 'danger' }[this.state()] as any)
   );
 
   // ─── Acciones públicas ─────────────────────────────────────────────────────
@@ -128,6 +128,18 @@ export class VoiceTranslator implements OnDestroy {
       await this.audioRecorder.startRecording(this.sourceLang.code);
 
       this.subs.push(
+        this.wsTranslator.connectionStatus$.subscribe(status => {
+          if (status === 'disconnected') {
+            if (this.state() !== 'idle') {
+              this.state.set('idle');
+              this.setError('Conexión perdida con el servidor.');
+              this.audioRecorder.fullyStop();
+            }
+          }
+        })
+      );
+
+      this.subs.push(
         this.audioRecorder.onVolumeLevel$.subscribe(vol => {
           this.volumeLevel = vol;
         })
@@ -144,12 +156,6 @@ export class VoiceTranslator implements OnDestroy {
           debounceTime(500)
         ).subscribe((text) => {
           this.wsTranslator.send({ type: 'translate_text', text: text });
-        })
-      );
-
-      this.subs.push(
-        this.audioRecorder.onFinalChunk$.subscribe((chunk) => {
-          this.wsTranslator.send({ type: 'translate_and_speak_chunk', text: chunk });
         })
       );
 
@@ -181,6 +187,13 @@ export class VoiceTranslator implements OnDestroy {
             if ((msg as any).audio_base64) {
               this.queueAudio((msg as any).audio_base64);
             }
+            break;
+
+          case 'meeting_result':
+            this.transcripcion.set(msg.transcripcion);
+            this.traduccion.set(msg.traduccion);
+            this.detectedLang.set(msg.source_lang ?? null);
+            this.resultTarget.set(msg.target_lang ?? null);
             break;
 
           case 'translation_result':
@@ -226,12 +239,15 @@ export class VoiceTranslator implements OnDestroy {
     }
 
     this.currentAudio = new Audio('data:audio/mp3;base64,' + base64);
+    this.audioRecorder.setMuted(true);
     this.currentAudio.onended = () => {
+      this.audioRecorder.setMuted(false);
       this.isPlayingQueue = false;
       this.playNextAudio();
     };
     this.currentAudio.play().catch(e => {
       console.error('Error reproduciendo chunk de audio:', e);
+      this.audioRecorder.setMuted(false);
       this.isPlayingQueue = false;
       this.playNextAudio();
     });
@@ -244,9 +260,18 @@ export class VoiceTranslator implements OnDestroy {
       this.currentAudio.pause();
     }
     this.currentAudio = new Audio('data:audio/mp3;base64,' + base64);
-    this.currentAudio.onended = () => { this.isPlayingQueue = false; };
+    
+    this.audioRecorder.setMuted(true);
+    
+    this.currentAudio.onended = () => { 
+      this.audioRecorder.setMuted(false);
+      this.isPlayingQueue = false; 
+    };
     this.isPlayingQueue = true;
-    this.currentAudio.play().catch(e => console.error('Error audio final:', e));
+    this.currentAudio.play().catch(e => {
+      this.audioRecorder.setMuted(false);
+      console.error('Error audio final:', e);
+    });
   }
 
   private async stopAll(): Promise<void> {

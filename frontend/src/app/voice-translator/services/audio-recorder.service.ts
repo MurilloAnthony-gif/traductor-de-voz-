@@ -2,17 +2,7 @@ import { Injectable } from '@angular/core';
 import { Subject } from 'rxjs';
 
 /**
- * Servicio de grabación activado por voz (VAD - Voice Activity Detection).
- *
- * Flujo de Frase Completa (Utterance-based):
- *  1. startRecording() abre el micrófono y comienza a analizar el volumen.
- *  2. El usuario habla (volumen > SILENCE_THRESHOLD) → hasSpeech = true.
- *  3. El usuario hace silencio real por SILENCE_DURATION_MS → se detiene el grabador.
- *  4. onstop emite el Blob completo por onUtteranceReady$.
- *  5. El grabador se reinicia automáticamente para la siguiente frase.
- *
- *  El volumen normalizado (0..1) se emite continuamente por onVolumeLevel$
- *  para que la UI pueda mostrar la animación de ondas.
+ * Servicio de grabación activado por voz (VAD) y reconocimiento nativo del navegador.
  */
 @Injectable({ providedIn: 'root' })
 export class AudioRecorderService {
@@ -49,10 +39,37 @@ export class AudioRecorderService {
   private finalTranscript = '';
 
   // ─── Configuración ─────────────────────────────────────────────────────────
-  /** Umbral RMS (0.05 = ignora ruido de fondo sin sacrificar rapidez) */
-  private readonly SILENCE_THRESHOLD   = 0.05;
-  /** Tiempo de silencio tras voz que dispara el fin de frase (700ms = rápido) */
-  private readonly SILENCE_DURATION_MS = 700;
+  /** Umbral RMS (0.015 = equilibrio perfecto entre sensibilidad y rechazo de ruido) */
+  private readonly SILENCE_THRESHOLD   = 0.015;
+  /** Tiempo de silencio tras voz que dispara el fin de frase (500ms = muy rápido) */
+  private readonly SILENCE_DURATION_MS = 500;
+
+  public isMuted = false;
+
+  constructor() {}
+
+  /**
+   * Mutea temporalmente la grabación y el reconocimiento.
+   * Ideal para evitar que el micrófono capte el audio del TTS.
+   */
+  setMuted(muted: boolean) {
+    this.isMuted = muted;
+    if (muted) {
+      if (this.recognition) {
+        try { this.recognition.abort(); } catch (e) {}
+      }
+      if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+        this.mediaRecorder.pause();
+      }
+    } else {
+      if (this.recognition) {
+        try { this.recognition.start(); } catch (e) {}
+      }
+      if (this.mediaRecorder && this.mediaRecorder.state === 'paused') {
+        this.mediaRecorder.resume();
+      }
+    }
+  }
 
   // ─── API pública ───────────────────────────────────────────────────────────
 
@@ -112,6 +129,7 @@ export class AudioRecorderService {
 
       this.audioChunks = [];
       this.hasSpeech   = false;
+      this.finalTranscript = '';
 
       // Reinicio automático para la siguiente frase
       if (!this.isStopping) {
@@ -132,6 +150,7 @@ export class AudioRecorderService {
     this.recognition.lang = langCode === 'es' ? 'es-ES' : (langCode === 'en' ? 'en-US' : langCode);
 
     this.recognition.onresult = (event: any) => {
+      if (this.isMuted) return;
       let interimTranscript = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const chunk = event.results[i][0].transcript;
@@ -146,7 +165,7 @@ export class AudioRecorderService {
     };
     
     this.recognition.onend = () => {
-      if (!this.isStopping && this.recognition) {
+      if (!this.isStopping && this.recognition && !this.isMuted) {
         try { this.recognition.start(); } catch (e) {}
       }
     };
@@ -172,10 +191,13 @@ export class AudioRecorderService {
 
     const dataArray = new Float32Array(this.analyser.fftSize);
 
-    const checkVolume = () => {
-      if (!this.analyser) return;
-
-      this.analyser.getFloatTimeDomainData(dataArray);
+    const processAudio = () => {
+      if (this.isStopping) return;
+      if (this.isMuted) {
+        requestAnimationFrame(processAudio);
+        return;
+      }
+      this.analyser!.getFloatTimeDomainData(dataArray);
 
       // Calcular RMS (energía de la señal de audio)
       let sum = 0;
@@ -192,12 +214,28 @@ export class AudioRecorderService {
           this.hasSpeech = true;
           this.speechStartTime = Date.now();
         }
+        if (this.silenceTimer) {
+          clearTimeout(this.silenceTimer);
+          this.silenceTimer = null;
+        }
+      } else {
+        if (this.hasSpeech && !this.silenceTimer) {
+          this.silenceTimer = setTimeout(() => {
+            if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+              this.mediaRecorder.stop();
+            }
+            if (this.recognition) {
+              try { this.recognition.abort(); } catch (e) {}
+            }
+            this.silenceTimer = null;
+          }, this.SILENCE_DURATION_MS);
+        }
       }
 
-      this.animationFrameId = requestAnimationFrame(checkVolume);
+      this.animationFrameId = requestAnimationFrame(processAudio);
     };
 
-    this.animationFrameId = requestAnimationFrame(checkVolume);
+    this.animationFrameId = requestAnimationFrame(processAudio);
   }
 
   private _stopSilenceDetection(): void {
